@@ -27,6 +27,46 @@ afterEach(async () => {
 });
 
 describe("ComprehendRedactor", () => {
+  it.each([0, -1, 1.5, NaN, Infinity, 2_147_483_648])("rejects an unsupported timer delay: %s", (timeoutMs) => {
+    expect(() => new ComprehendRedactor({ timeoutMs })).toThrow("timeoutMs");
+  });
+
+  it("releases its own SDK client once without destroying borrowed clients", () => {
+    const destroy = vi.spyOn(ComprehendClient.prototype, "destroy");
+    try {
+      const owned = new ComprehendRedactor({ region: "us-east-1" });
+      owned.destroy();
+      owned.destroy();
+      expect(destroy).toHaveBeenCalledTimes(1);
+      const borrowed = new ComprehendClient({ region: "us-east-1" });
+      clients.push(borrowed);
+      new ComprehendRedactor({ client: borrowed }).destroy();
+      expect(destroy).toHaveBeenCalledTimes(1);
+    } finally {
+      destroy.mockRestore();
+    }
+  });
+
+  it("aborts all active detection on destroy and prevents later endpoint calls", async () => {
+    const signals: AbortSignal[] = [];
+    const send = vi.fn((_, options: { abortSignal: AbortSignal }) => {
+      signals.push(options.abortSignal);
+      return new Promise<DetectPiiEntitiesCommandOutput>(() => {});
+    });
+    const redactor = new ComprehendRedactor({ client: { send } });
+    const endpoint = vi.fn(async () => "sent");
+    const first = expect(firstValueFrom(of({ prompt: "first" }).pipe(redactor.protect(endpoint)))).rejects.toThrow("no text was forwarded");
+    const second = expect(redactor.redact("second")).rejects.toThrow("no text was forwarded");
+    redactor.destroy();
+    await Promise.all([first, second]);
+    expect(signals).toHaveLength(2);
+    expect(signals.every(signal => signal.aborted)).toBe(true);
+    await expect(redactor.redact("")).rejects.toThrow("destroyed");
+    await expect(firstValueFrom(of({ messages: [] }).pipe(redactor.protect(endpoint)))).rejects.toThrow("destroyed");
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(endpoint).not.toHaveBeenCalled();
+  });
+
   it("replaces multiple out-of-order ranges without changing the input", async () => {
     const { redactor } = fixture([span(18, 32), span(6, 10)]);
     expect(await redactor.redact("Hello Jane, email jane@demo.test.")).toBe(
@@ -165,6 +205,45 @@ describe("ComprehendRedactor", () => {
     expect(send).not.toHaveBeenCalled();
     expect(endpoint).not.toHaveBeenCalled();
   });
+
+  it.each(["delete", "replace", "mutate"])(
+    "snapshots message text before awaiting detection when the caller chooses to %s it",
+    async (change) => {
+      let finish!: (value: DetectPiiEntitiesCommandOutput) => void;
+      const send = vi
+        .fn()
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              finish = resolve;
+            }),
+        )
+        .mockResolvedValue({ Entities: [span(0, 4)], $metadata: {} });
+      const redactor = new ComprehendRedactor({ client: { send } });
+      const originalMessages = [{ role: "user", content: "Jane!" }];
+      const input: { prompt: string; messages?: typeof originalMessages } = {
+        prompt: "public",
+        messages: originalMessages,
+      };
+      const endpoint = vi.fn(async (options: typeof input) => options);
+      const pending = firstValueFrom(
+        of(input).pipe(redactor.protect(endpoint)),
+      );
+      if (change === "delete") delete input.messages;
+      if (change === "replace") input.messages = [];
+      if (change === "mutate") originalMessages[0].content = "different secret";
+      finish({ Entities: [], $metadata: {} });
+      expect(await pending).toEqual({
+        prompt: "public",
+        messages: [{ role: "user", content: "[REDACTED]!" }],
+      });
+      expect(send.mock.calls.map(([command]) => command.input.Text)).toEqual([
+        "public",
+        "Jane!",
+      ]);
+      expect(endpoint).toHaveBeenCalledOnce();
+    },
+  );
 
   it("does not forward partially redacted messages when a later detection fails", async () => {
     const send = vi

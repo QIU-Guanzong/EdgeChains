@@ -38,7 +38,9 @@ const reply = await firstValueFrom(
 Observable, so it also works with the existing Gemini/Llama chat methods. It
 redacts `prompt` and every `messages[].content`, leaving the caller's object
 unchanged. All these fields must be plain text. Images and structured message
-content are rejected. Fields outside those two paths are not inspected: do not
+content are rejected. Text and message objects are copied before detection starts,
+so changes to the caller's input while a request is pending do not bypass redaction.
+Fields outside those two paths are not inspected: do not
 put secrets in model options, names, tool arguments or other metadata.
 
 `redact(text, signal?)` returns a Promise. `redact$(text)` is a cold Observable;

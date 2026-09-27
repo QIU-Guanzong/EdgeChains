@@ -34,6 +34,9 @@ export class ComprehendRedactor {
   private readonly client: PiiClient;
   private readonly languageCode: "en" | "es";
   private readonly timeoutMs: number;
+  private readonly ownedClient?: ComprehendClient;
+  private readonly pending = new Set<AbortController>();
+  private destroyed = false;
 
   constructor(options: ComprehendRedactorOptions = {}) {
     this.languageCode = options.languageCode ?? "en";
@@ -41,13 +44,24 @@ export class ComprehendRedactor {
     if (!["en", "es"].includes(this.languageCode)) {
       throw new Error("PII detection supports English or Spanish input");
     }
-    if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1) {
-      throw new Error("timeoutMs must be a positive safe integer");
+    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 2_147_483_647) {
+      throw new Error("timeoutMs must be an integer from 1 to 2147483647");
     }
     // No automatic retries: repeated detection requests may incur charges.
-    this.client =
-      options.client ??
-      new ComprehendClient({ region: options.region, maxAttempts: 1 });
+    if (options.client) this.client = options.client;
+    else {
+      this.ownedClient = new ComprehendClient({ region: options.region, maxAttempts: 1 });
+      this.client = this.ownedClient;
+    }
+  }
+
+  /** Stop detection and release connections owned by this redactor. */
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    for (const controller of this.pending) controller.abort();
+    this.pending.clear();
+    this.ownedClient?.destroy();
   }
 
   private validateText(text: string): void {
@@ -67,10 +81,12 @@ export class ComprehendRedactor {
   }
 
   async redact(text: string, signal?: AbortSignal): Promise<string> {
+    if (this.destroyed) throw new Error("PII redactor has been destroyed");
     this.validateText(text);
     if (signal?.aborted) throw new Error("PII detection cancelled");
     if (!text) return "";
     const controller = new AbortController();
+    this.pending.add(controller);
     const abort = () => controller.abort();
     signal?.addEventListener("abort", abort, { once: true });
     const timer = setTimeout(abort, this.timeoutMs);
@@ -140,6 +156,7 @@ export class ComprehendRedactor {
       pieces.push(characters.slice(cursor).join(""));
       return pieces.join("");
     } finally {
+      this.pending.delete(controller);
       clearTimeout(timer);
       signal?.removeEventListener("abort", abort);
       controller.signal.removeEventListener("abort", stopWaiting);
@@ -164,22 +181,27 @@ export class ComprehendRedactor {
       this.abortable(async (signal) => {
         if (!options || typeof options !== "object")
           throw new Error("A text prompt is required");
-        if (options.prompt === undefined && options.messages === undefined) {
+        // Snapshot every supported path before the first await. The caller may
+        // otherwise remove or mutate messages while prompt detection is pending.
+        const result = { ...options };
+        if (result.prompt === undefined && result.messages === undefined) {
           throw new Error("A prompt or messages array is required");
         }
-        if (options.prompt !== undefined) this.validateText(options.prompt);
-        if (options.messages !== undefined) {
-          if (!Array.isArray(options.messages))
+        if (result.prompt !== undefined) this.validateText(result.prompt);
+        if (result.messages !== undefined) {
+          if (!Array.isArray(result.messages))
             throw new Error("messages must be an array");
-          for (const message of options.messages)
-            this.validateText(message?.content);
+          result.messages = result.messages.map((message) => {
+            const copy = { ...message };
+            this.validateText(copy.content);
+            return copy;
+          });
         }
-        const result = { ...options };
-        if (options.prompt !== undefined)
-          result.prompt = await this.redact(options.prompt, signal);
-        if (options.messages !== undefined) {
+        if (result.prompt !== undefined)
+          result.prompt = await this.redact(result.prompt, signal);
+        if (result.messages !== undefined) {
           const messages: Array<{ content: string }> = [];
-          for (const message of options.messages) {
+          for (const message of result.messages) {
             messages.push({
               ...message,
               content: await this.redact(message.content, signal),
@@ -196,6 +218,10 @@ export class ComprehendRedactor {
     work: (signal: AbortSignal) => Promise<T>,
   ): Observable<T> {
     return new Observable((subscriber) => {
+      if (this.destroyed) {
+        subscriber.error(new Error("PII redactor has been destroyed"));
+        return;
+      }
       const controller = new AbortController();
       work(controller.signal).then(
         (value) => {
