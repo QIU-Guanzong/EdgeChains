@@ -44,13 +44,20 @@ export class ComprehendRedactor {
     if (!["en", "es"].includes(this.languageCode)) {
       throw new Error("PII detection supports English or Spanish input");
     }
-    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 2_147_483_647) {
+    if (
+      !Number.isInteger(this.timeoutMs) ||
+      this.timeoutMs < 1 ||
+      this.timeoutMs > 2_147_483_647
+    ) {
       throw new Error("timeoutMs must be an integer from 1 to 2147483647");
     }
     // No automatic retries: repeated detection requests may incur charges.
     if (options.client) this.client = options.client;
     else {
-      this.ownedClient = new ComprehendClient({ region: options.region, maxAttempts: 1 });
+      this.ownedClient = new ComprehendClient({
+        region: options.region,
+        maxAttempts: 1,
+      });
       this.client = this.ownedClient;
     }
   }
@@ -225,6 +232,10 @@ export class ComprehendRedactor {
       const controller = new AbortController();
       work(controller.signal).then(
         (value) => {
+          if (this.destroyed) {
+            subscriber.error(new Error("PII redactor has been destroyed"));
+            return;
+          }
           subscriber.next(value);
           subscriber.complete();
         },

@@ -18,6 +18,7 @@ const text = "🙂 Please greet Jane; use jane@example.test.";
 const originalAdapter = axios.defaults.adapter;
 let server;
 let client;
+let redactor;
 let downstreamCalls = 0;
 try {
     if (!live) {
@@ -53,7 +54,7 @@ try {
         };
     }
     console.log(live ? "LIVE: paid AWS Comprehend + OpenAI, synthetic text only" : "OFFLINE: AWS SDK -> localhost fixture; OpenAI class -> mock adapter. No cloud calls.");
-    const redactor = new ComprehendRedactor({ client, region: process.env.AWS_REGION ?? "us-east-1" });
+    redactor = new ComprehendRedactor({ client, region: process.env.AWS_REGION ?? "us-east-1" });
     const openai = new OpenAI(live ? {} : { apiKey: "LOCAL_TEST_ONLY", orgId: "LOCAL_TEST_ONLY" });
     const safeText = await firstValueFrom(redactor.redact$(text));
     console.log("Redacted:", safeText);
@@ -69,6 +70,7 @@ try {
     console.log("PASS: observable chain, Unicode ranges, and failure handling");
 } finally {
     axios.defaults.adapter = originalAdapter;
+    redactor?.destroy();
     client?.destroy();
     if (server) {
         server.closeAllConnections();

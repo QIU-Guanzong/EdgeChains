@@ -27,9 +27,12 @@ afterEach(async () => {
 });
 
 describe("ComprehendRedactor", () => {
-  it.each([0, -1, 1.5, NaN, Infinity, 2_147_483_648])("rejects an unsupported timer delay: %s", (timeoutMs) => {
-    expect(() => new ComprehendRedactor({ timeoutMs })).toThrow("timeoutMs");
-  });
+  it.each([0, -1, 1.5, NaN, Infinity, 2_147_483_648])(
+    "rejects an unsupported timer delay: %s",
+    (timeoutMs) => {
+      expect(() => new ComprehendRedactor({ timeoutMs })).toThrow("timeoutMs");
+    },
+  );
 
   it("releases its own SDK client once without destroying borrowed clients", () => {
     const destroy = vi.spyOn(ComprehendClient.prototype, "destroy");
@@ -55,14 +58,20 @@ describe("ComprehendRedactor", () => {
     });
     const redactor = new ComprehendRedactor({ client: { send } });
     const endpoint = vi.fn(async () => "sent");
-    const first = expect(firstValueFrom(of({ prompt: "first" }).pipe(redactor.protect(endpoint)))).rejects.toThrow("no text was forwarded");
-    const second = expect(redactor.redact("second")).rejects.toThrow("no text was forwarded");
+    const first = expect(
+      firstValueFrom(of({ prompt: "first" }).pipe(redactor.protect(endpoint))),
+    ).rejects.toThrow("no text was forwarded");
+    const second = expect(redactor.redact("second")).rejects.toThrow(
+      "no text was forwarded",
+    );
     redactor.destroy();
     await Promise.all([first, second]);
     expect(signals).toHaveLength(2);
-    expect(signals.every(signal => signal.aborted)).toBe(true);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
     await expect(redactor.redact("")).rejects.toThrow("destroyed");
-    await expect(firstValueFrom(of({ messages: [] }).pipe(redactor.protect(endpoint)))).rejects.toThrow("destroyed");
+    await expect(
+      firstValueFrom(of({ messages: [] }).pipe(redactor.protect(endpoint))),
+    ).rejects.toThrow("destroyed");
     expect(send).toHaveBeenCalledTimes(2);
     expect(endpoint).not.toHaveBeenCalled();
   });
@@ -72,6 +81,18 @@ describe("ComprehendRedactor", () => {
     expect(await redactor.redact("Hello Jane, email jane@demo.test.")).toBe(
       "Hello [REDACTED], email [REDACTED].",
     );
+  });
+
+  it("does not forward a prepared prompt after destruction", async () => {
+    const { redactor, send } = fixture();
+    const endpoint = vi.fn(async () => "sent");
+    const assertion = expect(
+      firstValueFrom(of({ prompt: "" }).pipe(redactor.protect(endpoint))),
+    ).rejects.toThrow("destroyed");
+    redactor.destroy();
+    await assertion;
+    expect(send).not.toHaveBeenCalled();
+    expect(endpoint).not.toHaveBeenCalled();
   });
 
   it("uses Unicode character positions rather than UTF-16 indices", async () => {

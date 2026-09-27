@@ -27,11 +27,15 @@ import { OpenAI } from "@arakoodev/edgechains.js/ai";
 
 const redactor = new ComprehendRedactor({ region: "us-east-1" });
 const model = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const reply = await firstValueFrom(
-    of({ prompt: "Please greet Jane; use jane@example.test." }).pipe(
-        redactor.protect(options => model.chat(options))
-    )
-);
+try {
+  const reply = await firstValueFrom(
+      of({ prompt: "Please greet Jane; use jane@example.test." }).pipe(
+          redactor.protect(options => model.chat(options))
+      )
+  );
+} finally {
+  redactor.destroy();
+}
 ```
 
 `protect` takes a bound function or arrow function returning a Promise or
@@ -48,6 +52,11 @@ put secrets in model options, names, tool arguments or other metadata.
 each input is processed sequentially, and a new subscription makes new requests.
 Unsubscribe aborts in-flight detection and prevents a downstream call that has
 not yet started. It cannot undo an endpoint request already sent.
+
+Call `destroy()` when finished to abort pending detection and release the SDK
+connections created by this instance. It is safe to call more than once. An
+injected client remains owned by its caller and is not destroyed. A destroyed
+redactor cannot be reused; already-started downstream calls cannot be recalled.
 
 ## Live validation
 
@@ -78,7 +87,8 @@ is not a substitute for those acceptance steps.
   malformed ranges, malformed responses and unpaired surrogates stop the chain.
 - Errors and timeout stop the chain; raw SDK errors are neither logged nor
   attached as causes, because they may include input text. Default timeout is
-  30 seconds. The internally created SDK client has retries disabled; an injected
+  30 seconds; configured delays must be integers from 1 to 2,147,483,647 ms.
+  The internally created SDK client has retries disabled; an injected
   client owns its retry configuration and lifecycle.
 
 References: [DetectPiiEntities](https://docs.aws.amazon.com/comprehend/latest/APIReference/API_DetectPiiEntities.html),
